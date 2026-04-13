@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-docx
+pydantic
+python-multipart
+reportlab
+python-pptx
+boto3
+pymongo
+python-dotenv
