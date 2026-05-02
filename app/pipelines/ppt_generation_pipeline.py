@@ -1,6 +1,10 @@
+"""PPTX document generation pipeline."""
 import base64
+import logging
 from io import BytesIO
 from zipfile import ZIP_DEFLATED, ZipFile
+
+# pylint: disable=broad-exception-caught
 
 from pptx import Presentation
 from pptx.dml.color import RGBColor
@@ -27,13 +31,26 @@ class PptGenerationPipeline:
     - XML extracted_data: renders parsed_body paragraphs/tables into content slides.
     """
 
+    def __init__(self) -> None:
+        self.logger = logging.getLogger(__name__)
+
     def run(self, payload: DocumentGenerationRequest, file_name: str) -> bytes:
+        """Build a PPTX from the payload and return raw bytes."""
         _ = file_name
+        data_type = type(
+            payload.extracted_data).__name__ if payload.extracted_data else "blocks"
+        self.logger.info(
+            "ppt_pipeline_start file=%s data_type=%s", file_name, data_type)
         # Highest-fidelity path: reconstruct pptx package directly from extracted
         # OpenXML parts when available (preserves masters/themes/backgrounds).
         if isinstance(payload.extracted_data, ExtractedPptData):
-            rebuilt = self._try_rebuild_from_package_dump(payload.extracted_data)
+            rebuilt = self._try_rebuild_from_package_dump(
+                payload.extracted_data)
             if rebuilt is not None:
+                self.logger.info(
+                    "ppt_pipeline_complete file=%s strategy=package_dump size_bytes=%d",
+                    file_name, len(rebuilt)
+                )
                 return rebuilt
 
         prs = Presentation()
@@ -49,12 +66,20 @@ class PptGenerationPipeline:
         else:
             self._from_blocks(prs, payload)
 
-        output = BytesIO()
-        prs.save(output)
-        return output.getvalue()
+        with BytesIO() as output:
+            prs.save(output)
+            result = output.getvalue()
+        self.logger.info(
+            "ppt_pipeline_complete file=%s strategy=generated size_bytes=%d",
+            file_name, len(result)
+        )
+        return result
 
-    def _try_rebuild_from_package_dump(self, data: ExtractedPptData) -> bytes | None:
+    def _try_rebuild_from_package_dump(  # pylint: disable=too-many-branches  # NOSONAR
+        self, data: ExtractedPptData
+    ) -> bytes | None:
         if not data.parts:
+            self.logger.debug("ppt_package_dump_skip reason=no_parts")
             return None
 
         xml_parts = {
@@ -67,6 +92,10 @@ class PptGenerationPipeline:
         required = ["[Content_Types].xml",
                     "_rels/.rels", "ppt/presentation.xml"]
         if not all(k in xml_parts for k in required):
+            self.logger.debug(
+                "ppt_package_dump_skip reason=missing_required_parts xml_parts=%d",
+                len(xml_parts)
+            )
             return None
 
         media_bytes_by_path: dict[str, bytes] = {}
@@ -77,8 +106,10 @@ class PptGenerationPipeline:
             if not b64 or not path:
                 continue
             try:
-                media_bytes_by_path[path] = base64.b64decode(b64)
-            except Exception:
+                media_bytes_by_path[path] = base64.b64decode(
+                    b64, validate=True)
+            except (TypeError, ValueError):
+                self.logger.debug("ppt_media_decode_failed path=%s", path)
                 continue
 
         # XML extraction mode stores picture blobs under parsed_slides[*].shapes[*]
@@ -95,8 +126,11 @@ class PptGenerationPipeline:
                 if path in media_bytes_by_path:
                     continue
                 try:
-                    media_bytes_by_path[path] = base64.b64decode(b64)
-                except Exception:
+                    media_bytes_by_path[path] = base64.b64decode(
+                        b64, validate=True)
+                except (TypeError, ValueError):
+                    self.logger.debug(
+                        "ppt_shape_media_decode_failed path=%s", path)
                     continue
 
         binary_bytes_by_path: dict[str, bytes] = {}
@@ -107,8 +141,11 @@ class PptGenerationPipeline:
             if not path or not b64:
                 continue
             try:
-                binary_bytes_by_path[path] = base64.b64decode(b64)
-            except Exception:
+                binary_bytes_by_path[path] = base64.b64decode(
+                    b64, validate=True)
+            except (TypeError, ValueError):
+                self.logger.debug(
+                    "ppt_binary_part_decode_failed path=%s", path)
                 continue
 
         output = BytesIO()
@@ -125,18 +162,33 @@ class PptGenerationPipeline:
             for path, blob in media_bytes_by_path.items():
                 archive.writestr(path, blob)
 
+        self.logger.debug(
+            "ppt_package_dump_assembled xml_parts=%d media=%d binary=%d",
+            len(xml_parts), len(media_bytes_by_path), len(binary_bytes_by_path)
+        )
         return output.getvalue()
 
-    def _from_ppt_extracted(self, prs: Presentation, data: ExtractedPptData, title: str | None) -> None:
+    def _from_ppt_extracted(  # pylint: disable=too-many-branches,too-many-statements  # NOSONAR
+        self, prs: Presentation, data: ExtractedPptData, title: str | None
+    ) -> None:
         # JSON-adapter path: slide-wise rehydration using slide indices.
         if data.slides:
+            self.logger.info(
+                "ppt_from_ppt_extracted path=json_slides slide_count=%d",
+                len(data.slides)
+            )
             paragraphs_by_idx = {p.index: p for p in data.paragraphs}
             tables_by_idx = {t.index: t for t in data.tables}
-            media_by_idx = {i: m for i, m in enumerate(data.media)}
+            media_by_idx = dict(enumerate(data.media))
 
-            for slide in sorted(data.slides, key=lambda s: (s.index if s.index is not None else 10**9)):
+            for slide in sorted(
+                data.slides, key=lambda s: (
+                    s.index if s.index is not None else 10**9)
+            ):
                 slide_title = (
-                    slide.title or f"Slide {(slide.slide_number or ((slide.index or 0) + 1))}").strip()
+                    slide.title
+                    or f"Slide {(slide.slide_number or ((slide.index or 0) + 1))}"
+                ).strip()
                 slide_lines: list[str] = []
 
                 for p_idx in slide.paragraph_indices:
@@ -187,8 +239,19 @@ class PptGenerationPipeline:
 
         # XML-pipeline path: use parsed_slides directly.
         if data.parsed_slides:
-            for slide in sorted(data.parsed_slides, key=lambda s: (s.index if s.index is not None else 10**9)):
+            self.logger.info(
+                "ppt_from_ppt_extracted path=parsed_slides slide_count=%d",
+                len(data.parsed_slides)
+            )
+            for slide in sorted(
+                data.parsed_slides, key=lambda s: (
+                    s.index if s.index is not None else 10**9)
+            ):
                 if slide.parse_error:
+                    self.logger.warning(
+                        "ppt_slide_skipped reason=parse_error slide_index=%s error=%s",
+                        slide.index, slide.parse_error
+                    )
                     continue
 
                 slide_title = (
@@ -209,7 +272,10 @@ class PptGenerationPipeline:
 
                 slide_tables: list[list[list[str]]] = []
                 for shape in (slide.shapes or []):
-                    if shape.get("kind") != "graphic_frame" or shape.get("graphic_type") != "table":
+                    if (
+                        shape.get("kind") != "graphic_frame"
+                        or shape.get("graphic_type") != "table"
+                    ):
                         continue
                     table_payload = shape.get("table") or {}
                     rows = []
@@ -256,7 +322,13 @@ class PptGenerationPipeline:
             elif isinstance(block, TableBlock):
                 self._add_table_slide(prs, title="Table", rows=block.rows)
 
-    def _from_json(self, prs: Presentation, data: ExtractedData, title: str | None) -> None:
+    def _from_json(  # NOSONAR
+        self, prs: Presentation, data: ExtractedData, title: str | None
+    ) -> None:
+        self.logger.info(
+            "ppt_from_json paragraphs=%d tables=%d",
+            len(data.paragraphs), len(data.tables)
+        )
         if title:
             self._add_title_slide(prs, title, "")
 
@@ -294,7 +366,13 @@ class PptGenerationPipeline:
                     for row in t.rows]
             self._add_table_slide(prs, title="Table", rows=rows)
 
-    def _from_xml(self, prs: Presentation, data: ExtractedXmlData, title: str | None) -> None:
+    def _from_xml(  # NOSONAR
+        self, prs: Presentation, data: ExtractedXmlData, title: str | None
+    ) -> None:
+        self.logger.info(
+            "ppt_from_xml body_items=%d",
+            len(data.parsed_body)
+        )
         if title:
             self._add_title_slide(prs, title, "")
 
@@ -381,7 +459,7 @@ class PptGenerationPipeline:
             for c_i, value in enumerate(row):
                 table.cell(r_i, c_i).text = value or ""
 
-    def _add_composite_slide(
+    def _add_composite_slide(  # NOSONAR
         self,
         prs: Presentation,
         title: str,
@@ -469,7 +547,7 @@ class PptGenerationPipeline:
             for para in tf.paragraphs:
                 for run in para.runs:
                     run.font.color.rgb = RGBColor.from_string(color)
-        except Exception:
+        except Exception:  # NOSONAR
             return
 
     def _normalize_hex_rgb(self, value: str | None) -> str | None:
@@ -488,7 +566,12 @@ class PptGenerationPipeline:
             return None
         return v.upper()
 
-    def _pick_title_color_from_paragraphs(self, slide_title: str, paragraph_indices: list[int], paragraphs_by_idx: dict[int, object]) -> str | None:
+    def _pick_title_color_from_paragraphs(  # NOSONAR
+        self,
+        slide_title: str,
+        paragraph_indices: list[int],
+        paragraphs_by_idx: dict[int, object],
+    ) -> str | None:
         title_norm = (slide_title or "").strip().lower()
         for idx in paragraph_indices:
             para = paragraphs_by_idx.get(idx)
@@ -532,7 +615,7 @@ class PptGenerationPipeline:
         try:
             notes_slide = slide.notes_slide
             notes_slide.notes_text_frame.text = notes_text.strip()
-        except Exception:
+        except Exception:  # NOSONAR
             pass
 
     def _pad_to_shape_count(self, slide, expected_count: int | None) -> None:
@@ -582,8 +665,8 @@ class PptGenerationPipeline:
             media, "base64", None)
         if b64:
             try:
-                img_blob = base64.b64decode(b64)
-            except Exception:
+                img_blob = base64.b64decode(b64, validate=True)
+            except (TypeError, ValueError):
                 img_blob = None
 
         if not img_blob:
@@ -594,7 +677,7 @@ class PptGenerationPipeline:
             slide.shapes.add_picture(
                 stream, left, top, width=max_w, height=max_h)
             return True
-        except Exception:
+        except Exception:  # NOSONAR
             return False
 
     def _clean_body_lines(self, lines: list[str], title: str) -> list[str]:

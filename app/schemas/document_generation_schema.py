@@ -1,9 +1,12 @@
+"""Pydantic schemas for the Document Generator service."""
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class ListInfo(BaseModel):
+    """List formatting metadata for a paragraph."""
+
     kind: Literal["bullet", "numbered"] | None = None
     numbering_format: str | None = None
     level: int = 0
@@ -12,6 +15,8 @@ class ListInfo(BaseModel):
 
 
 class SourceInfo(BaseModel):
+    """Source HTML tag/attribute metadata for an extracted element."""
+
     format: str | None = None
     tag: str | None = None
     attrs: dict[str, Any] = Field(default_factory=dict)
@@ -20,6 +25,8 @@ class SourceInfo(BaseModel):
 
 
 class HtmlMetadata(BaseModel):
+    """HTML document-level metadata extracted from the source file."""
+
     source_type: str | None = None
     extraction_mode: str | None = None
     title: str | None = None
@@ -37,6 +44,8 @@ class HtmlMetadata(BaseModel):
 
 
 class ParagraphBlock(BaseModel):
+    """A simple paragraph or heading block for legacy block-based payloads."""
+
     type: Literal["paragraph"]
     text: str
     heading_level: int | None = Field(default=None, ge=1, le=9)
@@ -49,6 +58,8 @@ class ParagraphBlock(BaseModel):
 
 
 class TableBlock(BaseModel):
+    """A simple table block for legacy block-based payloads."""
+
     type: Literal["table"]
     rows: list[list[str]]
     style: str | None = None
@@ -59,6 +70,8 @@ DocumentBlock = Annotated[ParagraphBlock |
 
 
 class ExtractedMediaItem(BaseModel):
+    """An extracted media item (image/video) with optional base64 data."""
+
     relationship_id: str | None = None
     content_type: str | None = None
     file_name: str | None = None
@@ -74,6 +87,8 @@ class ExtractedMediaItem(BaseModel):
 
 
 class ExtractedRun(BaseModel):
+    """A run of text with uniform formatting within a paragraph."""
+
     index: int | None = None
     text: str | None = None
     bold: bool | None = None
@@ -91,6 +106,8 @@ class ExtractedRun(BaseModel):
 
 
 class ExtractedStyleFont(BaseModel):
+    """Font properties for a named document style."""
+
     name: str | None = None
     size_pt: float | None = None
     bold: bool | None = None
@@ -102,6 +119,8 @@ class ExtractedStyleFont(BaseModel):
 
 
 class ExtractedStyle(BaseModel):
+    """A named style definition extracted from the source document."""
+
     style_id: str | None = None
     name: str | None = None
     type: str | None = None
@@ -110,6 +129,8 @@ class ExtractedStyle(BaseModel):
 
 
 class ExtractedDocumentDefaults(BaseModel):
+    """Document-level default font and color settings."""
+
     font_name: str | None = None
     font_size_pt: float | None = None
     color_rgb: str | None = None
@@ -117,6 +138,8 @@ class ExtractedDocumentDefaults(BaseModel):
 
 
 class ExtractedParagraph(BaseModel):
+    """A fully parsed paragraph with runs, list info, and source metadata."""
+
     index: int
     text: str | None = None
     style: str | None = None
@@ -138,6 +161,8 @@ class ExtractedParagraph(BaseModel):
 
 
 class ExtractedTableCell(BaseModel):
+    """A single cell in an extracted table, possibly containing nested content."""
+
     text: str | None = None
     paragraphs: list["ExtractedParagraph"] = Field(default_factory=list)
     tables: list["ExtractedTable"] = Field(default_factory=list)
@@ -151,12 +176,16 @@ class ExtractedTableCell(BaseModel):
 
 
 class ExtractedTableRow(BaseModel):
+    """A row of cells in an extracted table."""
+
     cells: list[ExtractedTableCell] = Field(default_factory=list)
     row_index: int | None = None
     model_config = ConfigDict(extra="ignore")
 
 
 class ExtractedTable(BaseModel):
+    """An extracted table with rows, style, and source metadata."""
+
     index: int
     row_count: int | None = None
     column_count: int | None = None
@@ -167,11 +196,15 @@ class ExtractedTable(BaseModel):
 
 
 class ExtractedOrderItem(BaseModel):
+    """An entry in the document_order list specifying element type and index."""
+
     type: Literal["paragraph", "table", "media"]
     index: int
 
 
 class ExtractedData(BaseModel):
+    """Top-level structured extraction result for JSON-adapter outputs."""
+
     metadata: HtmlMetadata | dict[str, Any] | None = None
     document_order: list[ExtractedOrderItem] = Field(default_factory=list)
     document_defaults: ExtractedDocumentDefaults | None = None
@@ -184,12 +217,16 @@ class ExtractedData(BaseModel):
 
 
 class ExtractedXmlPart(BaseModel):
+    """A raw XML part (file path + content) from a DOCX/PPTX archive."""
+
     path: str
     xml: str
     model_config = ConfigDict(extra="ignore")
 
 
 class ExtractedXmlRun(BaseModel):
+    """A run of text extracted from raw XML with formatting and hyperlink info."""
+
     index: int | None = None
     text: str | None = None
     bold: bool | None = None
@@ -206,6 +243,8 @@ class ExtractedXmlRun(BaseModel):
 
 
 class ExtractedXmlParagraph(BaseModel):
+    """A paragraph extracted from raw XML with style and list metadata."""
+
     text: str | None = None
     style_id: str | None = None
     alignment: str | None = None
@@ -219,6 +258,8 @@ class ExtractedXmlParagraph(BaseModel):
 
 
 class ExtractedXmlTableCell(BaseModel):
+    """A table cell extracted from raw XML."""
+
     row_index: int | None = None
     cell_index: int | None = None
     text: str | None = None
@@ -227,12 +268,16 @@ class ExtractedXmlTableCell(BaseModel):
 
 
 class ExtractedXmlTableRow(BaseModel):
+    """A table row extracted from raw XML."""
+
     row_index: int | None = None
     cells: list[ExtractedXmlTableCell] = Field(default_factory=list)
     model_config = ConfigDict(extra="ignore")
 
 
 class ExtractedXmlTable(BaseModel):
+    """A table extracted from raw XML."""
+
     rows: list[ExtractedXmlTableRow] = Field(default_factory=list)
     row_count: int | None = None
     column_count: int | None = None
@@ -240,6 +285,8 @@ class ExtractedXmlTable(BaseModel):
 
 
 class ExtractedXmlBodyItem(BaseModel):
+    """A discriminated-union item in the XML body (paragraph or table)."""
+
     type: Literal["paragraph", "table"]
     index: int
     paragraph: ExtractedXmlParagraph | None = None
@@ -248,6 +295,8 @@ class ExtractedXmlBodyItem(BaseModel):
 
 
 class ExtractedXmlData(BaseModel):
+    """Top-level structured extraction result for XML-pipeline outputs."""
+
     format: str | None = None
     metadata: dict | None = None
     document_defaults: ExtractedDocumentDefaults | None = None
@@ -259,6 +308,8 @@ class ExtractedXmlData(BaseModel):
 
 
 class ExtractedPptSlide(BaseModel):
+    """High-level metadata and indices for a single PowerPoint slide."""
+
     index: int | None = None
     slide_number: int | None = None
     slide_id: int | None = None
@@ -277,6 +328,8 @@ class ExtractedPptSlide(BaseModel):
 
 
 class ExtractedPptParsedSlide(BaseModel):
+    """Fully parsed content (shapes, notes, relationships) for a single slide."""
+
     index: int | None = None
     slide_id: int | None = None
     rid: str | None = None
@@ -295,6 +348,8 @@ class ExtractedPptParsedSlide(BaseModel):
 
 
 class ExtractedPptData(BaseModel):
+    """Top-level extraction result for PowerPoint files."""
+
     format: str | None = None
     document_type: Literal["pptx"]
     metadata: dict | None = None
@@ -321,11 +376,25 @@ class ExtractedPptData(BaseModel):
 
 
 class DocumentGenerationRequest(BaseModel):
-    content_id: str
-    version: int
+    """Request body for document generation (POST /generate)."""
+
+    content_id: str = Field(
+        description="Content ID returned by the extractor service.",
+        examples=["69f64331423c9bfe1bf883a1"],
+    )
+    version: int = Field(
+        description="Version number of the extracted content to render.",
+        examples=[0],
+    )
+    force_regenerate: bool = Field(
+        default=False,
+        description="When true, bypass cache and regenerate the document even if one exists.",
+    )
 
 
 class ResolvedDocumentGenerationPayload(BaseModel):
+    """Fully resolved payload including extracted data and upload metadata."""
+
     content_id: str
     version: int
     source_content_updated_at: str | None = None
@@ -342,15 +411,137 @@ class ResolvedDocumentGenerationPayload(BaseModel):
 
 
 class DocumentGenerationResponse(BaseModel):
-    id: str
-    file_name: str
-    output_file_s3_key: str
-    download_url: str
-    url_expires_in_seconds: int = 3600
-    url_expires_at: str
-    extension: str = "docx"
+    """Response body for a successful document generation request."""
+
+    id: str = Field(
+        description="Generated document record ID in MongoDB.",
+        examples=["69f644f6423c9bfe1bf883c7"],
+    )
+    file_name: str = Field(
+        description="Generated output filename.",
+        examples=["invoice.docx"],
+    )
+    output_file_s3_key: str = Field(
+        description="S3 key for generated output file.",
+        examples=["document-generator/generated/content-id/version-0/invoice.docx"],
+    )
+    download_url: str = Field(
+        description="Presigned download URL for the generated output.",
+    )
+    url_expires_in_seconds: int = Field(
+        default=3600,
+        description="Presigned URL validity in seconds.",
+        examples=[3600],
+    )
+    url_expires_at: str = Field(
+        description="ISO-8601 UTC expiry timestamp for download_url.",
+    )
+    extension: str = Field(
+        default="docx",
+        description="Normalized generated file extension.",
+        examples=["docx"],
+    )
 
 
 class HealthResponse(BaseModel):
-    status: str
-    service: str
+    """Basic service health status response."""
+
+    status: str = Field(description="Overall health status.", examples=["ok"])
+    service: str = Field(description="Service name.",
+                         examples=["document-generator"])
+
+
+class DependencyStatus(BaseModel):
+    """Reachability status for downstream dependencies."""
+
+    s3: bool = Field(description="Whether S3 is reachable.")
+    mongodb: bool = Field(description="Whether MongoDB is reachable.")
+
+
+class HealthWithDependenciesResponse(BaseModel):
+    """Health status response including dependency reachability."""
+
+    status: str = Field(description="Overall health status.", examples=["ok"])
+    service: str = Field(description="Service name.",
+                         examples=["document-generator"])
+    dependencies: DependencyStatus
+
+
+class GeneratedDocumentRecord(BaseModel):
+    """A stored generated document record from MongoDB."""
+
+    id: str = Field(description="MongoDB document ID.",
+                    examples=["69f644f6423c9bfe1bf883c7"])
+    content_id: str
+    version: int
+    file_name: str
+    extension: str
+    output_file_s3_key: str
+    source_content_updated_at: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class GeneratedDocumentListResponse(BaseModel):
+    """Paginated list of generated document records."""
+
+    items: list[GeneratedDocumentRecord]
+    total: int
+    limit: int
+    offset: int
+
+
+class BatchGenerateItem(BaseModel):
+    """A single item in a batch generation request."""
+
+    content_id: str
+    version: int
+
+
+class BatchGenerateResult(BaseModel):
+    """Result for a single item in a batch generation response."""
+
+    content_id: str
+    version: int
+    extension: str | None
+    status: Literal["success", "error"]
+    result: "DocumentGenerationResponse | None" = None
+    error: str | None = None
+
+
+class BatchGenerateResponse(BaseModel):
+    """Response body for a batch document generation request."""
+
+    results: list[BatchGenerateResult]
+    total: int
+    succeeded: int
+    failed: int
+
+
+class GenerationCapabilitiesResponse(BaseModel):
+    """Service capabilities and configuration limits."""
+
+    supported_extensions: list[str]
+    max_json_bytes: int
+    max_media_bytes: int
+    max_hydration_depth: int
+    max_hydration_nodes: int
+    url_expiry_seconds: int
+    force_regenerate_supported: bool = True
+
+
+class DeleteGeneratedResponse(BaseModel):
+    """Response body for a delete generated document request."""
+
+    id: str
+    deleted_s3_key: str
+    message: str
+
+
+class FreshDownloadUrlResponse(BaseModel):
+    """Response body for a fresh presigned download URL request."""
+
+    id: str
+    download_url: str
+    url_expires_in_seconds: int
+    url_expires_at: str

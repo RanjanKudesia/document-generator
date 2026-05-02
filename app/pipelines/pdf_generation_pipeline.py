@@ -1,3 +1,4 @@
+"""PDF document generation pipeline using ReportLab."""
 import base64
 import logging
 import re
@@ -34,6 +35,19 @@ from app.schemas.document_generation_schema import (
     TableBlock,
 )
 
+H1 = "Heading 1"
+H2 = "Heading 2"
+H3 = "Heading 3"
+H4 = "Heading 4"
+H5 = "Heading 5"
+H6 = "Heading 6"
+H7 = "Heading 7"
+H8 = "Heading 8"
+H9 = "Heading 9"
+LIST_BULLET = "List Bullet"
+LIST_NUMBER = "List Number"
+BR_TAG = "<br/>"
+
 
 class PdfGenerationPipeline:
     """Generate a PDF directly from a DocumentGenerationRequest using ReportLab.
@@ -46,20 +60,28 @@ class PdfGenerationPipeline:
         self.logger = logging.getLogger(__name__)
 
     def run(self, payload: DocumentGenerationRequest, file_name: str) -> bytes:
+        """Build a PDF document from the payload and return raw PDF bytes."""
         _ = file_name
+        data_type = type(
+            payload.extracted_data).__name__ if payload.extracted_data else "blocks"
+        self.logger.info(
+            "pdf_pipeline_start file=%s data_type=%s", file_name, data_type)
         styles = self._build_styles()
         story = self._build_story(payload, styles)
-        output = BytesIO()
-        doc = SimpleDocTemplate(
-            output,
-            pagesize=A4,
-            leftMargin=72,
-            rightMargin=72,
-            topMargin=72,
-            bottomMargin=72,
-        )
-        doc.build(story)
-        return output.getvalue()
+        with BytesIO() as output:
+            doc = SimpleDocTemplate(
+                output,
+                pagesize=A4,
+                leftMargin=72,
+                rightMargin=72,
+                topMargin=72,
+                bottomMargin=72,
+            )
+            doc.build(story)
+            result = output.getvalue()
+        self.logger.info(
+            "pdf_pipeline_complete file=%s size_bytes=%d", file_name, len(result))
+        return result
 
     # ── Style registry ─────────────────────────────────────────────────────
 
@@ -72,26 +94,26 @@ class PdfGenerationPipeline:
 
         styles: dict = {
             "Normal": base["Normal"],
-            "Heading 1": base["Heading1"],
-            "Heading 2": base["Heading2"],
-            "Heading 3": base["Heading3"],
-            "Heading 4": base.get("Heading4") or _clone(
-                "Heading 4", fontSize=12, leading=16, fontName="Helvetica-Bold", spaceAfter=4
+            H1: base["Heading1"],
+            H2: base["Heading2"],
+            H3: base["Heading3"],
+            H4: base.get("Heading4") or _clone(
+                H4, fontSize=12, leading=16, fontName="Helvetica-Bold", spaceAfter=4
             ),
-            "Heading 5": base.get("Heading5") or _clone(
-                "Heading 5", fontSize=11, leading=14, fontName="Helvetica-BoldOblique", spaceAfter=2
+            H5: base.get("Heading5") or _clone(
+                H5, fontSize=11, leading=14, fontName="Helvetica-BoldOblique", spaceAfter=2
             ),
-            "Heading 6": base.get("Heading6") or _clone(
-                "Heading 6", fontSize=10, leading=12, fontName="Helvetica-BoldOblique", spaceAfter=2
+            H6: base.get("Heading6") or _clone(
+                H6, fontSize=10, leading=12, fontName="Helvetica-BoldOblique", spaceAfter=2
             ),
-            "Heading 7": _clone("Heading 7", fontSize=10, leading=12, fontName="Helvetica-Bold"),
-            "Heading 8": _clone("Heading 8", fontSize=9, leading=11, fontName="Helvetica-Bold"),
-            "Heading 9": _clone("Heading 9", fontSize=9, leading=11, fontName="Helvetica"),
-            "List Bullet": _clone(
-                "List Bullet", leftIndent=24, firstLineIndent=0, spaceBefore=2, spaceAfter=2
+            H7: _clone(H7, fontSize=10, leading=12, fontName="Helvetica-Bold"),
+            H8: _clone(H8, fontSize=9, leading=11, fontName="Helvetica-Bold"),
+            H9: _clone(H9, fontSize=9, leading=11, fontName="Helvetica"),
+            LIST_BULLET: _clone(
+                LIST_BULLET, leftIndent=24, firstLineIndent=0, spaceBefore=2, spaceAfter=2
             ),
-            "List Number": _clone(
-                "List Number", leftIndent=24, firstLineIndent=0, spaceBefore=2, spaceAfter=2
+            LIST_NUMBER: _clone(
+                LIST_NUMBER, leftIndent=24, firstLineIndent=0, spaceBefore=2, spaceAfter=2
             ),
         }
         return styles
@@ -121,10 +143,12 @@ class PdfGenerationPipeline:
 
     # ── JSON / ExtractedData path ──────────────────────────────────────────
 
-    def _add_json_extracted(self, story: list, data: ExtractedData, styles: dict) -> None:
+    def _add_json_extracted(  # NOSONAR  # pylint: disable=too-many-branches
+        self, story: list, data: ExtractedData, styles: dict
+    ) -> None:
         para_by_idx = {p.index: p for p in data.paragraphs}
         table_by_idx = {t.index: t for t in data.tables}
-        media_by_idx = {i: m for i, m in enumerate(data.media)}
+        media_by_idx = dict(enumerate(data.media))
         rendered_media: set[int] = set()
         current_page_index: int | None = None
 
@@ -223,14 +247,14 @@ class PdfGenerationPipeline:
         else:
             story.append(Paragraph(markup, style))
 
-    def _add_json_table(self, story: list, table: ExtractedTable, styles: dict) -> None:
+    def _add_json_table(self, story: list, table: ExtractedTable, styles: dict) -> None:  # NOSONAR
         rows_data = []
         nested_flowables: list = []
         for row in table.rows:
             row_cells = []
             for cell in row.cells:
                 if cell.paragraphs:
-                    cell_markup = "<br/>".join(
+                    cell_markup = BR_TAG.join(
                         self._runs_to_markup_json(
                             p.runs) if p.runs else escape(p.text or "")
                         for p in cell.paragraphs
@@ -268,12 +292,12 @@ class PdfGenerationPipeline:
         for _, nested_table, nested_styles in nested_flowables:
             self._add_json_table(story, nested_table, nested_styles)
 
-    def _runs_to_markup_json(self, runs: list) -> str:
+    def _runs_to_markup_json(self, runs: list) -> str:  # NOSONAR
         parts: list[str] = []
         for run in runs:
             text = escape(run.text or "")
-            text = text.replace("\n", "<br/>").replace("\t",
-                                                       "&#160;&#160;&#160;&#160;")
+            text = text.replace("\n", BR_TAG).replace("\t",
+                                                      "&#160;&#160;&#160;&#160;")
             if run.bold:
                 text = f"<b>{text}</b>"
             if run.italic:
@@ -305,10 +329,10 @@ class PdfGenerationPipeline:
         if style_name in styles:
             return styles[style_name]
         _map = {
-            "Heading1": "Heading 1", "heading1": "Heading 1",
-            "Heading2": "Heading 2", "heading2": "Heading 2",
-            "Heading3": "Heading 3", "heading3": "Heading 3",
-            "heading 1": "Heading 1", "heading 2": "Heading 2", "heading 3": "Heading 3",
+            "Heading1": H1, "heading1": H1,
+            "Heading2": H2, "heading2": H2,
+            "Heading3": H3, "heading3": H3,
+            "heading 1": H1, "heading 2": H2, "heading 3": H3,
         }
         mapped = _map.get(style_name)
         if mapped and mapped in styles:
@@ -378,7 +402,7 @@ class PdfGenerationPipeline:
             row_cells = []
             for cell in row.cells:
                 if cell.paragraphs:
-                    cell_markup = "<br/>".join(
+                    cell_markup = BR_TAG.join(
                         self._runs_to_markup_xml(p.runs, relationships)
                         if p.runs
                         else escape(p.text or "")
@@ -397,12 +421,12 @@ class PdfGenerationPipeline:
         story.append(tbl)
         story.append(Spacer(1, 6))
 
-    def _runs_to_markup_xml(self, runs: list, relationships: dict) -> str:
+    def _runs_to_markup_xml(self, runs: list, relationships: dict) -> str:  # NOSONAR
         parts: list[str] = []
         for run in runs:
             text = escape(run.text or "")
-            text = text.replace("\n", "<br/>").replace("\t",
-                                                       "&#160;&#160;&#160;&#160;")
+            text = text.replace("\n", BR_TAG).replace("\t",
+                                                      "&#160;&#160;&#160;&#160;")
             if run.bold:
                 text = f"<b>{text}</b>"
             if run.italic:
@@ -432,16 +456,16 @@ class PdfGenerationPipeline:
 
     def _resolve_xml_style(self, para: ExtractedXmlParagraph, styles: dict) -> ParagraphStyle:
         if para.is_numbered:
-            return styles.get("List Number", styles["Normal"])
+            return styles.get(LIST_NUMBER, styles["Normal"])
         if para.is_bullet:
-            return styles.get("List Bullet", styles["Normal"])
+            return styles.get(LIST_BULLET, styles["Normal"])
         style_id = para.style_id or ""
         if style_id in styles:
             return styles[style_id]
         _map = {
-            "Heading1": "Heading 1", "Heading2": "Heading 2", "Heading3": "Heading 3",
-            "Heading4": "Heading 4", "Heading5": "Heading 5", "Heading6": "Heading 6",
-            "Heading7": "Heading 7", "Heading8": "Heading 8", "Heading9": "Heading 9",
+            "Heading1": H1, "Heading2": H2, "Heading3": H3,
+            "Heading4": H4, "Heading5": H5, "Heading6": H6,
+            "Heading7": H7, "Heading8": H8, "Heading9": H9,
         }
         mapped = _map.get(style_id)
         if mapped and mapped in styles:
@@ -534,7 +558,7 @@ class PdfGenerationPipeline:
         try:
             media_b64 = media.base64_data or media.base64
             if media_b64:
-                img_bytes = base64.b64decode(media_b64)
+                img_bytes = base64.b64decode(media_b64, validate=True)
                 img_buf: BytesIO | str = BytesIO(img_bytes)
             elif media.local_file_path and Path(media.local_file_path).exists():
                 img_buf = media.local_file_path
@@ -545,7 +569,7 @@ class PdfGenerationPipeline:
             height = (media.height_emu / 914400) * \
                 72 if media.height_emu else None
             return RLImage(img_buf, width=width, height=height)
-        except Exception:
+        except (TypeError, ValueError, OSError):
             return None
 
     def _default_table_style(self) -> TableStyle:

@@ -1,3 +1,4 @@
+"""Plain-text document generation pipeline."""
 import logging
 
 from app.schemas.document_generation_schema import (
@@ -10,13 +11,23 @@ from app.schemas.document_generation_schema import (
 
 
 class TextGenerationPipeline:
+    """Generate a plain-text document from a DocumentGenerationRequest."""
+
     def __init__(self) -> None:
         self.logger = logging.getLogger(__name__)
 
     def run(self, payload: DocumentGenerationRequest, file_name: str) -> bytes:
+        """Build a plain-text document from the payload and return UTF-8 encoded bytes."""
         _ = file_name
+        data_type = type(
+            payload.extracted_data).__name__ if payload.extracted_data else "blocks"
+        self.logger.info(
+            "txt_pipeline_start file=%s data_type=%s", file_name, data_type)
         content = self._build_content(payload).rstrip() + "\n"
-        return content.encode("utf-8")
+        result = content.encode("utf-8")
+        self.logger.info(
+            "txt_pipeline_complete file=%s size_bytes=%d", file_name, len(result))
+        return result
 
     def _build_content(self, payload: DocumentGenerationRequest) -> str:
         lines: list[str] = []
@@ -40,7 +51,7 @@ class TextGenerationPipeline:
 
         return "\n".join(lines)
 
-    def _from_json(self, data: ExtractedData) -> list[str]:
+    def _from_json(self, data: ExtractedData) -> list[str]:  # NOSONAR
         paragraph_by_index = {item.index: item for item in data.paragraphs}
         table_by_index = {item.index: item for item in data.tables}
         lines: list[str] = []

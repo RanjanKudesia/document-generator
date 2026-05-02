@@ -1,3 +1,4 @@
+"""HTML document generation pipeline."""
 import logging
 from html import escape
 from itertools import groupby
@@ -20,6 +21,8 @@ from app.schemas.document_generation_schema import (
 
 
 class HtmlGenerationPipeline:
+    """Generate an HTML document from a DocumentGenerationRequest."""
+
     _BLOCK_PRESERVE_TAGS = {"ul", "ol", "table", "figure", "blockquote", "div",
                             "section", "pre", "details", "dl"}
     _DEFAULT_CSS: str = (
@@ -34,7 +37,8 @@ class HtmlGenerationPipeline:
         "ol li{list-style-type:decimal;}"
         "ul ul,ol ul{list-style-type:circle;margin:4px 0 4px 20px;}"
         "ul ol,ol ol{list-style-type:lower-alpha;margin:4px 0 4px 20px;}"
-        "code{background:#272822;color:#f8f8f2;padding:2px 5px;border-radius:3px;font-family:monospace;}"
+        "code{background:#272822;color:#f8f8f2;padding:2px 5px;"
+        "border-radius:3px;font-family:monospace;}"
         ".rtl{direction:rtl;unicode-bidi:bidi-override;}"
         "hr.doc-divider{border:none;border-top:1px solid #ccc;margin:16px 0;}"
         ".nested-table-note{font-size:0.8em;color:#888;font-style:italic;}"
@@ -44,9 +48,17 @@ class HtmlGenerationPipeline:
         self.logger = logging.getLogger(__name__)
 
     def run(self, payload: DocumentGenerationRequest, file_name: str) -> bytes:
+        """Build an HTML document from the payload and return UTF-8 encoded bytes."""
         _ = file_name
+        data_type = type(
+            payload.extracted_data).__name__ if payload.extracted_data else "blocks"
+        self.logger.info(
+            "html_pipeline_start file=%s data_type=%s", file_name, data_type)
         html = self._build_document(payload)
-        return html.encode("utf-8")
+        result = html.encode("utf-8")
+        self.logger.info(
+            "html_pipeline_complete file=%s size_bytes=%d", file_name, len(result))
+        return result
 
     def _build_document(self, payload: DocumentGenerationRequest) -> str:
         if payload.extracted_data is not None and not isinstance(
@@ -56,6 +68,8 @@ class HtmlGenerationPipeline:
             source_body = self._try_build_body_from_source_html(
                 payload.extracted_data, metadata)
             if source_body is not None:
+                self.logger.debug(
+                    "html_pipeline_path path=source_html_passthrough")
                 doctype = self._doctype_from_metadata(metadata)
                 html_attrs = self._attrs_to_html(
                     metadata.get("html_attributes"))
@@ -72,10 +86,14 @@ class HtmlGenerationPipeline:
 
         if payload.extracted_data is not None:
             if isinstance(payload.extracted_data, ExtractedXmlData):
+                self.logger.debug("html_pipeline_path path=xml_extracted")
                 body_parts.extend(self._from_xml(payload.extracted_data))
             else:
+                self.logger.debug("html_pipeline_path path=json_extracted")
                 body_parts.extend(self._from_json(payload.extracted_data))
         else:
+            self.logger.debug(
+                "html_pipeline_path path=blocks blocks=%d", len(payload.blocks))
             if payload.title:
                 body_parts.append(f"<h1>{escape(payload.title)}</h1>")
             body_parts.extend(self._from_blocks(payload.blocks))
@@ -253,14 +271,16 @@ class HtmlGenerationPipeline:
         frag = BeautifulSoup(new_html, "lxml").body
         if frag:
             for child in frag.children:
-                node.append(child.__copy__() if hasattr(
-                    child, "__copy__") else child)
+                node.append(
+                    child.__copy__()  # pylint: disable=unnecessary-dunder-call
+                    if hasattr(child, "__copy__") else child
+                )
         else:
             node.string = fallback_text
         for bc in block_children:
             node.append(bc)
 
-    def _insert_new_paragraph_in_body(
+    def _insert_new_paragraph_in_body(  # NOSONAR
         self,
         body: "Tag",
         soup: "BeautifulSoup",
@@ -277,8 +297,10 @@ class HtmlGenerationPipeline:
         frag = BeautifulSoup(new_html, "lxml").body
         if frag:
             for child in frag.children:
-                new_tag.append(child.__copy__() if hasattr(
-                    child, "__copy__") else child)
+                new_tag.append(
+                    child.__copy__()  # pylint: disable=unnecessary-dunder-call
+                    if hasattr(child, "__copy__") else child
+                )
         else:
             new_tag.string = paragraph.text or ""
 
@@ -315,10 +337,12 @@ class HtmlGenerationPipeline:
 
     # -- from JSON extracted_data --
 
-    def _from_json(self, data: ExtractedData) -> list[str]:
+    def _from_json(  # NOSONAR  # pylint: disable=too-many-statements
+        self, data: ExtractedData
+    ) -> list[str]:
         paragraph_by_index = {p.index: p for p in data.paragraphs}
         table_by_index = {t.index: t for t in data.tables}
-        media_by_index = {idx: m for idx, m in enumerate(data.media)}
+        media_by_index = dict(enumerate(data.media))
         parts: list[str] = []
         list_stack: list[tuple[str, int]] = []
 
@@ -423,7 +447,7 @@ class HtmlGenerationPipeline:
 
     # -- from XML extracted_data --
 
-    def _from_xml(self, data: ExtractedXmlData) -> list[str]:
+    def _from_xml(self, data: ExtractedXmlData) -> list[str]:  # NOSONAR
         parts: list[str] = []
         list_state: str | None = None
 
@@ -470,7 +494,7 @@ class HtmlGenerationPipeline:
 
     # -- table helpers --
 
-    def _extracted_table_to_html(self, t) -> str:
+    def _extracted_table_to_html(self, t) -> str:  # NOSONAR
         rows_html: list[str] = []
         for row in t.rows:
             cells_html: list[str] = []

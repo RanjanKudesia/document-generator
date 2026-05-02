@@ -1,7 +1,11 @@
+"""DOCX document generation pipeline."""
+# pylint: disable=too-many-lines
 import base64
 import logging
 from io import BytesIO
 from pathlib import Path
+
+# pylint: disable=protected-access,broad-exception-caught,c-extension-no-member
 
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
@@ -14,7 +18,8 @@ from docx.shared import Emu
 from docx.shared import Inches
 from docx.shared import Pt
 from docx.shared import RGBColor
-from lxml import etree
+from docx.shared import Twips
+from lxml import etree  # pylint: disable=c-extension-no-member,no-member
 
 from app.schemas.document_generation_schema import (
     DocumentGenerationRequest,
@@ -34,23 +39,37 @@ from app.schemas.document_generation_schema import (
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 XML_NS = {"w": W_NS}
 W_VAL_LITERAL = "w:val"
+W_RPR_LITERAL = "w:rPr"
+LIST_BULLET_STYLE = "List Bullet"
+LIST_NUMBER_STYLE = "List Number"
 
 
 class DocxGenerationPipeline:
+    """Generate a DOCX document from a DocumentGenerationRequest."""
+
     def __init__(self) -> None:
         self.logger = logging.getLogger(__name__)
 
     def run(self, payload: DocumentGenerationRequest, file_name: str) -> bytes:
+        """Build a DOCX document from the payload and return raw bytes."""
         _ = file_name
+        data_type = type(
+            payload.extracted_data).__name__ if payload.extracted_data else "blocks"
+        self.logger.info(
+            "docx_pipeline_start file=%s data_type=%s", file_name, data_type)
         document = Document()
 
         if payload.extracted_data is not None:
             if isinstance(payload.extracted_data, ExtractedXmlData):
+                self.logger.debug("docx_pipeline_path path=xml_extracted")
                 self._add_xml_extracted_payload(
                     document, payload.extracted_data)
             else:
+                self.logger.debug("docx_pipeline_path path=json_extracted")
                 self._add_extracted_payload(document, payload.extracted_data)
         else:
+            self.logger.debug(
+                "docx_pipeline_path path=blocks blocks=%d", len(payload.blocks))
             if payload.title:
                 document.add_heading(payload.title, level=1)
 
@@ -60,27 +79,47 @@ class DocxGenerationPipeline:
                 elif isinstance(block, TableBlock):
                     self._add_table_block(document, block)
 
-        output = BytesIO()
-        document.save(output)
-        return output.getvalue()
+        with BytesIO() as output:
+            document.save(output)
+            result = output.getvalue()
+        self.logger.info(
+            "docx_pipeline_complete file=%s size_bytes=%d", file_name, len(result))
+        return result
 
-    def _add_xml_extracted_payload(self, document: Document, extracted_data: ExtractedXmlData) -> None:
+    def _add_xml_extracted_payload(  # NOSONAR
+        self, document: Document, extracted_data: ExtractedXmlData
+    ) -> None:
         self._apply_document_defaults(
             document, extracted_data.document_defaults)
         self._apply_extracted_styles(document, extracted_data.styles)
 
         if extracted_data.parsed_body:
+            self.logger.debug(
+                "docx_xml_path path=parsed_body items=%d", len(extracted_data.parsed_body))
             self._add_xml_parsed_body(document, extracted_data)
             return
 
         doc_part = next(
             (p for p in extracted_data.parts if p.path == "word/document.xml"), None)
         if doc_part is None or not doc_part.xml.strip():
+            self.logger.warning(
+                "docx_xml_path path=raw_xml skipped reason=missing_document_xml")
             return
 
+        self.logger.debug("docx_xml_path path=raw_xml")
+        parser = etree.XMLParser(
+            resolve_entities=False,
+            load_dtd=False,
+            no_network=True,
+            recover=False,
+            huge_tree=False,
+        )
         try:
-            root = etree.fromstring(doc_part.xml.encode("utf-8"))
-        except Exception:
+            root = etree.fromstring(
+                doc_part.xml.encode("utf-8"), parser=parser)
+        except etree.XMLSyntaxError:
+            self.logger.warning(
+                "Skipping malformed document.xml while generating docx output")
             return
 
         body = root.find("w:body", XML_NS)
@@ -104,7 +143,12 @@ class DocxGenerationPipeline:
                 self._add_xml_parsed_table(
                     document, item.table, extracted_data.relationships)
 
-    def _add_xml_parsed_paragraph(self, document: Document, paragraph_data: ExtractedXmlParagraph, relationships: dict[str, str]) -> None:
+    def _add_xml_parsed_paragraph(  # pylint: disable=too-many-branches  # NOSONAR
+        self,
+        document: Document,
+        paragraph_data: ExtractedXmlParagraph,
+        relationships: dict[str, str],
+    ) -> None:
         style_name = self._resolve_xml_paragraph_style_name(paragraph_data)
         if style_name:
             try:
@@ -139,7 +183,12 @@ class DocxGenerationPipeline:
         elif paragraph_data.text:
             paragraph.add_run(paragraph_data.text)
 
-    def _add_xml_parsed_table(self, document: Document, table_data, relationships: dict[str, str]) -> None:
+    def _add_xml_parsed_table(  # NOSONAR
+        self,
+        document: Document,
+        table_data,
+        relationships: dict[str, str],
+    ) -> None:
         rows = table_data.rows or []
         if not rows:
             return
@@ -169,7 +218,12 @@ class DocxGenerationPipeline:
                 else:
                     cell.text = src_cell.text or ""
 
-    def _add_xml_parsed_paragraph_to_cell(self, cell, paragraph_data: ExtractedXmlParagraph, relationships: dict[str, str]) -> None:
+    def _add_xml_parsed_paragraph_to_cell(  # pylint: disable=too-many-branches  # NOSONAR
+        self,
+        cell,
+        paragraph_data: ExtractedXmlParagraph,
+        relationships: dict[str, str],
+    ) -> None:
         style_name = self._resolve_xml_paragraph_style_name(paragraph_data)
         if style_name:
             try:
@@ -222,7 +276,7 @@ class DocxGenerationPipeline:
                     int(hex_str[2:4], 16),
                     int(hex_str[4:6], 16),
                 )
-            except Exception:
+            except Exception:  # NOSONAR
                 pass
 
     def _add_xml_hyperlink_run(
@@ -241,7 +295,7 @@ class DocxGenerationPipeline:
                 r_id = paragraph.part.relate_to(
                     target, RT.HYPERLINK, is_external=True)
                 hyperlink.set(qn("r:id"), r_id)
-            except Exception:
+            except Exception:  # NOSONAR
                 run = paragraph.add_run(run_data.text or "")
                 self._apply_xml_run_formatting(run, run_data)
                 return
@@ -251,7 +305,7 @@ class DocxGenerationPipeline:
             return
 
         run_elem = OxmlElement("w:r")
-        rpr = OxmlElement("w:rPr")
+        rpr = OxmlElement(W_RPR_LITERAL)
 
         if run_data.bold:
             rpr.append(OxmlElement("w:b"))
@@ -259,13 +313,13 @@ class DocxGenerationPipeline:
             rpr.append(OxmlElement("w:i"))
         if run_data.underline is not False:
             u_elem = OxmlElement("w:u")
-            u_elem.set(qn("w:val"), "single")
+            u_elem.set(qn(W_VAL_LITERAL), "single")
             rpr.append(u_elem)
 
         color_hex = run_data.color_rgb.replace(
             "#", "").strip() if run_data.color_rgb else "0563C1"
         color_elem = OxmlElement("w:color")
-        color_elem.set(qn("w:val"), color_hex)
+        color_elem.set(qn(W_VAL_LITERAL), color_hex)
         rpr.append(color_elem)
 
         if run_data.font_name:
@@ -277,7 +331,7 @@ class DocxGenerationPipeline:
         if run_data.font_size_pt and run_data.font_size_pt > 0:
             half_pts = str(int(run_data.font_size_pt * 2))
             sz = OxmlElement("w:sz")
-            sz.set(qn("w:val"), half_pts)
+            sz.set(qn(W_VAL_LITERAL), half_pts)
             rpr.append(sz)
 
         run_elem.append(rpr)
@@ -311,11 +365,13 @@ class DocxGenerationPipeline:
 
         flush_text()
 
-    def _resolve_xml_paragraph_style_name(self, paragraph_data: ExtractedXmlParagraph) -> str | None:
+    def _resolve_xml_paragraph_style_name(
+        self, paragraph_data: ExtractedXmlParagraph
+    ) -> str | None:
         if paragraph_data.is_numbered:
-            return "List Number"
+            return LIST_NUMBER_STYLE
         if paragraph_data.is_bullet:
-            return "List Bullet"
+            return LIST_BULLET_STYLE
         mapped = self._map_xml_style_id(paragraph_data.style_id)
         if mapped:
             return mapped
@@ -334,8 +390,8 @@ class DocxGenerationPipeline:
             "Heading7": "Heading 7",
             "Heading8": "Heading 8",
             "Heading9": "Heading 9",
-            "ListBullet": "List Bullet",
-            "ListNumber": "List Number",
+            "ListBullet": LIST_BULLET_STYLE,
+            "ListNumber": LIST_NUMBER_STYLE,
         }
         return mapping.get(style_id, style_id)
 
@@ -391,8 +447,8 @@ class DocxGenerationPipeline:
             "Heading7": "Heading 7",
             "Heading8": "Heading 8",
             "Heading9": "Heading 9",
-            "ListBullet": "List Bullet",
-            "ListNumber": "List Number",
+            "ListBullet": LIST_BULLET_STYLE,
+            "ListNumber": LIST_NUMBER_STYLE,
         }
         return mapping.get(raw, raw)
 
@@ -422,7 +478,9 @@ class DocxGenerationPipeline:
                 )
                 table.cell(r_i, c_i).text = cell_text
 
-    def _add_extracted_payload(self, document: Document, extracted_data: ExtractedData) -> None:
+    def _add_extracted_payload(  # NOSONAR
+        self, document: Document, extracted_data: ExtractedData
+    ) -> None:
         self._apply_document_defaults(
             document, extracted_data.document_defaults)
         self._apply_extracted_styles(document, extracted_data.styles)
@@ -473,7 +531,6 @@ class DocxGenerationPipeline:
         if not sections:
             return
         try:
-            from docx.shared import Twips
             first = sections[0]
             if not isinstance(first, dict):
                 return
@@ -490,7 +547,7 @@ class DocxGenerationPipeline:
                 sec.top_margin = Twips(first["top_margin_twips"])
             if first.get("bottom_margin_twips"):
                 sec.bottom_margin = Twips(first["bottom_margin_twips"])
-        except Exception:
+        except Exception:  # NOSONAR
             pass
 
     def _apply_document_defaults(
@@ -520,10 +577,12 @@ class DocxGenerationPipeline:
                         int(hex_str[2:4], 16),
                         int(hex_str[4:6], 16),
                     )
-                except Exception:
+                except Exception:  # NOSONAR
                     pass
 
-    def _apply_extracted_styles(self, document: Document, styles: list[ExtractedStyle]) -> None:
+    def _apply_extracted_styles(  # pylint: disable=too-many-branches  # NOSONAR
+        self, document: Document, styles: list[ExtractedStyle]
+    ) -> None:
         """Apply extracted style font defaults so inherited run formatting is preserved."""
         for style_data in styles:
             if style_data.font is None:
@@ -563,7 +622,7 @@ class DocxGenerationPipeline:
                         int(hex_str[2:4], 16),
                         int(hex_str[4:6], 16),
                     )
-                except Exception:
+                except Exception:  # NOSONAR
                     pass
             else:
                 self._clear_style_rpr_override(style_obj, "color")
@@ -581,14 +640,14 @@ class DocxGenerationPipeline:
         """Remove direct run-property override from style XML so value can inherit."""
         try:
             style_el = style_obj.element
-            rpr = style_el.find(qn("w:rPr"))
+            rpr = style_el.find(qn(W_RPR_LITERAL))
             if rpr is None:
                 return
 
             child = rpr.find(qn(f"w:{tag_name}"))
             if child is not None:
                 rpr.remove(child)
-        except Exception:
+        except Exception:  # NOSONAR
             return
 
     def _get_or_create_style(self, document: Document, style_data: ExtractedStyle):
@@ -622,10 +681,12 @@ class DocxGenerationPipeline:
 
         try:
             return document.styles.add_style(style_name, create_type)
-        except Exception:
+        except Exception:  # NOSONAR
             return None
 
-    def _add_extracted_paragraph(self, document: Document, paragraph_data: ExtractedParagraph) -> None:
+    def _add_extracted_paragraph(  # NOSONAR
+        self, document: Document, paragraph_data: ExtractedParagraph
+    ) -> None:
         paragraph = self._create_output_paragraph(document, paragraph_data)
         self._apply_paragraph_spacing(paragraph, paragraph_data)
         self._apply_paragraph_rtl(paragraph, paragraph_data)
@@ -641,7 +702,7 @@ class DocxGenerationPipeline:
                 fmt.space_after = Pt(paragraph_data.space_after_pt)
             if paragraph_data.line_spacing is not None and paragraph_data.line_spacing > 0:
                 fmt.line_spacing = paragraph_data.line_spacing
-        except Exception:
+        except Exception:  # NOSONAR
             pass
 
     def _apply_paragraph_rtl(self, paragraph, paragraph_data: ExtractedParagraph) -> None:
@@ -654,7 +715,7 @@ class DocxGenerationPipeline:
             if bidi is None:
                 bidi = OxmlElement("w:bidi")
                 p_pr.append(bidi)
-        except Exception:
+        except Exception:  # NOSONAR
             pass
 
     def _populate_output_paragraph(self, paragraph, paragraph_data: ExtractedParagraph) -> None:
@@ -697,7 +758,7 @@ class DocxGenerationPipeline:
             for media_item in run_data.embedded_media:
                 self._add_media_to_paragraph(paragraph, media_item)
 
-    def _apply_run_formatting(self, run, run_data) -> None:
+    def _apply_run_formatting(self, run, run_data) -> None:  # NOSONAR
         if run_data.bold is not None:
             run.bold = run_data.bold
         if run_data.italic is not None:
@@ -718,7 +779,7 @@ class DocxGenerationPipeline:
                     int(hex_str[2:4], 16),
                     int(hex_str[4:6], 16),
                 )
-            except Exception:
+            except Exception:  # NOSONAR
                 pass
         if run_data.highlight_color:
             try:
@@ -752,7 +813,7 @@ class DocxGenerationPipeline:
         """Build oxml run element with hyperlink style overrides."""
         del text
         run_elem = OxmlElement("w:r")
-        rpr = OxmlElement("w:rPr")
+        rpr = OxmlElement(W_RPR_LITERAL)
 
         hyperlink_blue = self._resolve_hyperlink_color(run_data)
         color_elem = OxmlElement("w:color")
@@ -814,7 +875,7 @@ class DocxGenerationPipeline:
         except KeyError:
             return
 
-    def _populate_docx_table(self, table, table_data: ExtractedTable) -> None:
+    def _populate_docx_table(self, table, table_data: ExtractedTable) -> None:  # NOSONAR
         """Populate a docx table recursively from extracted table data."""
         for row_index, row in enumerate(table_data.rows):
             for column_index, cell_data in enumerate(row.cells):
@@ -859,7 +920,9 @@ class DocxGenerationPipeline:
         for nested_table in getattr(cell_data, "tables", []) or []:
             self._add_nested_docx_table(cell, nested_table)
 
-    def _populate_existing_cell_paragraph(self, paragraph, paragraph_data: ExtractedParagraph) -> None:
+    def _populate_existing_cell_paragraph(
+        self, paragraph, paragraph_data: ExtractedParagraph
+    ) -> None:
         """Populate the default paragraph already present in a table cell."""
         paragraph.text = ""
         self._populate_output_paragraph(paragraph, paragraph_data)
@@ -919,16 +982,16 @@ class DocxGenerationPipeline:
 
     def _resolve_paragraph_style_name(self, paragraph_data: ExtractedParagraph) -> str | None:
         if paragraph_data.is_numbered:
-            return "List Number"
+            return LIST_NUMBER_STYLE
 
         if paragraph_data.is_bullet:
-            return "List Bullet"
+            return LIST_BULLET_STYLE
 
         if paragraph_data.numbering_format:
             fmt = paragraph_data.numbering_format.split(":", 1)[0].lower()
             if fmt == "bullet":
-                return "List Bullet"
-            return "List Number"
+                return LIST_BULLET_STYLE
+            return LIST_NUMBER_STYLE
 
         if paragraph_data.style:
             return paragraph_data.style
@@ -968,7 +1031,8 @@ class DocxGenerationPipeline:
 
             picture_source = None
             if base64_data:
-                picture_source = BytesIO(base64.b64decode(base64_data))
+                picture_source = BytesIO(
+                    base64.b64decode(base64_data, validate=True))
             elif local_file_path:
                 media_path = Path(local_file_path)
                 if media_path.exists() and media_path.is_file():
@@ -984,6 +1048,6 @@ class DocxGenerationPipeline:
                 run.add_picture(picture_source, width=Emu(width_emu))
             else:
                 run.add_picture(picture_source, width=Inches(2.5))
-        except Exception:
+        except (TypeError, ValueError, OSError):
             # Ignore invalid/unsupported image data and continue with text content.
             return

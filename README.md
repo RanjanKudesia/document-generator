@@ -6,7 +6,10 @@ FastAPI microservice for generating output documents from structured content.
 
 - Single generation endpoint: `POST /generate`
 - Accepts `db_record_id` from content-extractor response and loads `extracted_data` from MongoDB
-- Downloads embedded media directly from S3 using stored `s3_key`
+- Supports three media extraction modes from content-extractor:
+  - **Extraction disabled** (`extract_media=false`): No media in payload
+  - **Inline media** (`extract_media=true, store_media=false`): Media stored as base64 inline in JSON
+  - **S3-backed media** (`extract_media=true, store_media=true`): Media stored on S3, reference via `s3_key` (default)
 - Uploads generated document to S3 (no local output persistence)
 - Returns S3 presigned download URL with 1 hour expiry
 - Supported output extensions:
@@ -60,6 +63,33 @@ Response includes:
 - `url_expires_in_seconds` (always 3600)
 - `url_expires_at`
 - `extension`
+
+## Media Extraction Modes
+
+The generator automatically adapts to the media extraction mode used by the extractor. These modes are stored in MongoDB and control how media is retrieved during generation:
+
+### 1. No Media Extraction (`extract_media=false`)
+
+- Extractor skips media extraction entirely
+- Payload contains **no media array**
+- Generator skips all S3 hydration (nothing to hydrate)
+- Best for: Text-only generation or performance-sensitive scenarios
+
+### 2. Inline Media (`extract_media=true, store_media=false`)
+
+- Extractor extracts media but keeps it as **base64 inline** in the JSON payload
+- Payload contains media array with `base64` or `base64_data` fields populated
+- Generator skips S3 lookup (media already present)
+- Best for: Small documents or when S3 access is limited
+- Payload size: Larger (base64 encoded media inline)
+
+### 3. S3-Backed Media (Default: `extract_media=true, store_media=true`)
+
+- Extractor extracts media and uploads to S3
+- Payload contains media array with `s3_key` references
+- Generator downloads media from S3 on demand and converts to base64
+- Best for: Large documents with many media assets
+- Payload size: Smaller (only references)
 
 ## Notes
 
