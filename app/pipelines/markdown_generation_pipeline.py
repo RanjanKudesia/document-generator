@@ -1,3 +1,4 @@
+import logging
 import re
 
 from app.schemas.document_generation_schema import (
@@ -13,7 +14,11 @@ from app.schemas.document_generation_schema import (
 
 
 class MarkdownGenerationPipeline:
+    def __init__(self) -> None:
+        self.logger = logging.getLogger(__name__)
+
     def run(self, payload: DocumentGenerationRequest, file_name: str) -> bytes:
+        _ = file_name
         content = self._build_content(payload).rstrip() + "\n"
         return content.encode("utf-8")
 
@@ -73,19 +78,44 @@ class MarkdownGenerationPipeline:
 
     def _paragraph_to_md(self, paragraph: ExtractedParagraph) -> str:
         heading_level = self._heading_level_from_style(paragraph.style)
+
+        # Fenced code block
+        code_lang = getattr(paragraph, "code_fence_language", None)
+        if code_lang is not None or paragraph.style == "CodeBlock":
+            lang = code_lang if code_lang is not None else ""
+            body = paragraph.text or ""
+            return f"```{lang}\n{body}\n```"
+
         text = self._runs_to_md(paragraph.runs) if paragraph.runs else (
             paragraph.text or "")
         text = text.strip()
         if heading_level:
+            text = re.sub(r"^#+\s*", "", text)
             return f"{'#' * heading_level} {text}"
         if paragraph.is_bullet:
-            return f"- {text}"
+            indent_level = self._list_indent_level(paragraph)
+            prefix = "  " * indent_level
+            return f"{prefix}- {text}"
         if paragraph.is_numbered:
+            indent_level = self._list_indent_level(paragraph)
+            prefix = "  " * indent_level
             marker = paragraph.numbering_format or "1."
             if not re.match(r"^\d+[.)]$", marker):
                 marker = "1."
-            return f"{marker} {text}"
+            return f"{prefix}{marker} {text}"
         return text
+
+    def _list_indent_level(self, paragraph) -> int:
+        """Return the nesting depth stored in list_info or list_level."""
+        list_level = getattr(paragraph, "list_level", None)
+        if list_level is not None:
+            return int(list_level)
+        list_info = getattr(paragraph, "list_info", None)
+        if isinstance(list_info, dict):
+            return int(list_info.get("level") or list_info.get("indent_level") or 0)
+        if list_info is not None:
+            return int(getattr(list_info, "level", 0) or 0)
+        return 0
 
     def _xml_paragraph_to_md(self, paragraph: ExtractedXmlParagraph) -> str:
         heading_level = self._heading_level_from_style(paragraph.style_id)
@@ -131,12 +161,15 @@ class MarkdownGenerationPipeline:
         return "\n".join(lines)
 
     def _pipe_row(self, row: list[str]) -> str:
-        return "| " + " | ".join((cell or "").replace("\n", " ").strip() for cell in row) + " |"
+        def _escape_cell(cell: str) -> str:
+            return (cell or "").replace("|", "\\|").replace("\n", " ").strip()
+        return "| " + " | ".join(_escape_cell(cell) for cell in row) + " |"
 
     def _runs_to_md(self, runs: list) -> str:
         return "".join(
             self._apply_inline_markdown(
-                run.text or "", run.bold, run.italic, run.underline, run.hyperlink_url)
+                run.text or "", run.bold, run.italic, run.underline,
+                run.hyperlink_url, getattr(run, "code", None))
             for run in runs
         ).replace("\n", "  \n")
 
@@ -157,7 +190,10 @@ class MarkdownGenerationPipeline:
         italic: bool | None,
         underline: bool | None,
         link: str | None = None,
+        code: bool | None = None,
     ) -> str:
+        if code:
+            return f"`{text}`"
         result = text
         if bold and italic:
             result = f"***{result}***"
@@ -177,4 +213,7 @@ class MarkdownGenerationPipeline:
         match = re.search(r"heading\s*([1-6])", style, flags=re.IGNORECASE)
         if match:
             return int(match.group(1))
+        m2 = re.match(r"^h([1-6])$", style.lower())
+        if m2:
+            return int(m2.group(1))
         return None

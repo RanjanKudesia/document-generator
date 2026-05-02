@@ -1,16 +1,20 @@
 import base64
+import logging
 import re
 from html import escape
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
 from reportlab.platypus import (
     Image as RLImage,
     ListFlowable,
     ListItem,
+    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -26,8 +30,6 @@ from app.schemas.document_generation_schema import (
     ExtractedTable,
     ExtractedXmlData,
     ExtractedXmlParagraph,
-    ExtractedXmlRun,
-    ExtractedRun,
     ParagraphBlock,
     TableBlock,
 )
@@ -40,7 +42,11 @@ class PdfGenerationPipeline:
     Supports blocks, JSON (ExtractedData) and XML (ExtractedXmlData) payloads.
     """
 
+    def __init__(self) -> None:
+        self.logger = logging.getLogger(__name__)
+
     def run(self, payload: DocumentGenerationRequest, file_name: str) -> bytes:
+        _ = file_name
         styles = self._build_styles()
         story = self._build_story(payload, styles)
         output = BytesIO()
@@ -118,22 +124,73 @@ class PdfGenerationPipeline:
     def _add_json_extracted(self, story: list, data: ExtractedData, styles: dict) -> None:
         para_by_idx = {p.index: p for p in data.paragraphs}
         table_by_idx = {t.index: t for t in data.tables}
+        media_by_idx = {i: m for i, m in enumerate(data.media)}
+        rendered_media: set[int] = set()
+        current_page_index: int | None = None
 
         if data.document_order:
             for item in data.document_order:
                 if item.type == "paragraph":
                     p = para_by_idx.get(item.index)
+                    current_page_index = self._append_page_break_if_needed(
+                        story, current_page_index, self._coerce_page_index(p))
                     if p:
                         self._add_json_paragraph(story, p, styles)
                 elif item.type == "table":
                     t = table_by_idx.get(item.index)
+                    current_page_index = self._append_page_break_if_needed(
+                        story, current_page_index, self._coerce_page_index(t))
                     if t:
                         self._add_json_table(story, t, styles)
+                elif item.type == "media":
+                    m = media_by_idx.get(item.index)
+                    current_page_index = self._append_page_break_if_needed(
+                        story, current_page_index, self._coerce_page_index(m))
+                    if m is not None:
+                        img = self._make_image(m)
+                        if img:
+                            story.append(img)
+                            story.append(Spacer(1, 4))
+                            rendered_media.add(item.index)
         else:
             for p in sorted(data.paragraphs, key=lambda x: x.index):
                 self._add_json_paragraph(story, p, styles)
             for t in sorted(data.tables, key=lambda x: x.index):
                 self._add_json_table(story, t, styles)
+
+        # Render any media not already placed via document_order
+        for idx, m in sorted(media_by_idx.items()):
+            if idx not in rendered_media:
+                img = self._make_image(m)
+                if img:
+                    story.append(img)
+                    story.append(Spacer(1, 4))
+
+    def _append_page_break_if_needed(
+        self,
+        story: list,
+        current_page_index: int | None,
+        next_page_index: int | None,
+    ) -> int | None:
+        """Insert page break when source page index advances."""
+        if next_page_index is None:
+            return current_page_index
+        if current_page_index is None:
+            return next_page_index
+        if next_page_index > current_page_index:
+            story.append(PageBreak())
+            return next_page_index
+        return current_page_index
+
+    def _coerce_page_index(self, item: Any) -> int | None:
+        """Safely parse page_index from extracted items."""
+        if item is None:
+            return None
+        value = getattr(item, "page_index", None)
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
 
     def _add_json_paragraph(self, story: list, para: ExtractedParagraph, styles: dict) -> None:
         for run in para.runs:
@@ -168,6 +225,7 @@ class PdfGenerationPipeline:
 
     def _add_json_table(self, story: list, table: ExtractedTable, styles: dict) -> None:
         rows_data = []
+        nested_flowables: list = []
         for row in table.rows:
             row_cells = []
             for cell in row.cells:
@@ -180,15 +238,35 @@ class PdfGenerationPipeline:
                 else:
                     cell_markup = escape(cell.text or "")
                 row_cells.append(Paragraph(cell_markup, styles["Normal"]))
+                # Collect nested tables to render after the parent table.
+                for nested in (cell.tables or []):
+                    nested_flowables.append(("nested", nested, styles))
             rows_data.append(row_cells)
 
         if not rows_data:
             return
 
-        tbl = Table(rows_data, repeatRows=1)
+        # Compute proportional column widths from max text length per column.
+        col_count = max(len(r) for r in rows_data)
+        col_max_len: list[int] = [1] * col_count
+        for row in table.rows:
+            for c_i, cell in enumerate(row.cells):
+                cell_text = cell.text or ""
+                if c_i < col_count:
+                    col_max_len[c_i] = max(
+                        col_max_len[c_i], len(cell_text) or 1)
+        total_len = sum(col_max_len) or 1
+        available_width = 6.5 * inch  # default body width
+        col_widths = [available_width * (w / total_len) for w in col_max_len]
+
+        tbl = Table(rows_data, colWidths=col_widths, repeatRows=1)
         tbl.setStyle(self._default_table_style())
         story.append(tbl)
         story.append(Spacer(1, 6))
+
+        # Render nested tables after the parent table.
+        for _, nested_table, nested_styles in nested_flowables:
+            self._add_json_table(story, nested_table, nested_styles)
 
     def _runs_to_markup_json(self, runs: list) -> str:
         parts: list[str] = []
@@ -202,6 +280,8 @@ class PdfGenerationPipeline:
                 text = f"<i>{text}</i>"
             if run.underline:
                 text = f"<u>{text}</u>"
+            if getattr(run, "strikethrough", None):
+                text = f"<strike>{text}</strike>"
             font_attrs: list[str] = []
             if run.font_name:
                 safe_face = self._sanitize_reportlab_font_name(run.font_name)
@@ -432,7 +512,7 @@ class PdfGenerationPipeline:
         # Keep to core fonts that ReportLab always understands.
         if "courier" in key:
             return "Courier"
-        if "times" in key or "serif" in key:
+        if "times" in key or "georgia" in key or "palatino" in key or "garamond" in key:
             return "Times-Roman"
         if "symbol" in key:
             return "Symbol"
@@ -440,7 +520,11 @@ class PdfGenerationPipeline:
             return "ZapfDingbats"
 
         # Default sans families -> Helvetica to avoid parser failures.
-        if any(token in key for token in ("helvetica", "arial", "inter", "roboto", "sans")):
+        if any(token in key for token in (
+            "helvetica", "arial", "inter", "roboto", "sans",
+            "calibri", "verdana", "tahoma", "trebuchet", "gill",
+            "futura", "optima", "franklin", "myriad", "segoe",
+        )):
             return "Helvetica"
 
         # Unknown families are omitted; style default font will be used.

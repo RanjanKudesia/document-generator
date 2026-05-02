@@ -56,12 +56,6 @@ def generate_document(content_id: str, version: int) -> DocumentGenerationRespon
     s3_adapter = _get_s3_adapter()
     resolved_payload = _resolve_payload(payload)
 
-    existing_generated = _get_existing_generated_document(
-        content_id=payload.content_id,
-        version=payload.version,
-        mongo_adapter=mongo_adapter,
-    )
-
     ext = (resolved_payload.extension or "docx").lower().lstrip(".")
 
     if ext not in _SUPPORTED_EXTENSIONS:
@@ -84,11 +78,6 @@ def generate_document(content_id: str, version: int) -> DocumentGenerationRespon
         s3_adapter=s3_adapter,
     )
 
-    existing_s3_key = (
-        existing_generated.get("output_file_s3_key")
-        if isinstance(existing_generated, dict)
-        else None
-    )
     if s3_adapter.object_exists(output_key):
         logger.info(
             "generate_cache_hit content_id=%s version=%s output_key=%s",
@@ -296,7 +285,14 @@ def _resolve_payload(payload: DocumentGenerationRequest) -> ResolvedDocumentGene
             upload_metadata = None
 
     merged = payload.model_dump(mode="python")
-    merged["extracted_data"] = stored_content.get("data")
+    data_s3_key = stored_content.get("data_s3_key")
+    if data_s3_key:
+        import json as _json
+        raw_bytes = _get_s3_adapter().download_bytes(data_s3_key)
+        merged["extracted_data"] = _json.loads(raw_bytes)
+    else:
+        # Backward-compat: older records stored the payload inline.
+        merged["extracted_data"] = stored_content.get("data")
     source_content_updated_at = stored_content.get("updated_at")
     normalized_source_updated_at = None
     if source_content_updated_at is not None:
@@ -321,21 +317,6 @@ def _resolve_payload(payload: DocumentGenerationRequest) -> ResolvedDocumentGene
             ) from exc
 
     return ResolvedDocumentGenerationPayload.model_validate(merged)
-
-
-def _get_existing_generated_document(
-    *,
-    content_id: str,
-    version: int,
-    mongo_adapter: MongoDbStorageAdapter,
-) -> dict | None:
-    try:
-        return mongo_adapter.get_generated_document(content_id=content_id, version=version)
-    except MongoStorageError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(exc),
-        ) from exc
 
 
 def _hydrate_media_from_s3(node: object, s3_adapter: S3StorageAdapter) -> None:

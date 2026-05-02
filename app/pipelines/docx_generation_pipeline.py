@@ -1,4 +1,5 @@
 import base64
+import logging
 from io import BytesIO
 from pathlib import Path
 
@@ -20,22 +21,27 @@ from app.schemas.document_generation_schema import (
     ExtractedData,
     ExtractedDocumentDefaults,
     ExtractedParagraph,
+    ExtractedTable,
     ExtractedXmlParagraph,
     ExtractedXmlRun,
     ExtractedXmlData,
     ExtractedMediaItem,
     ExtractedStyle,
-    ExtractedTable,
     ParagraphBlock,
     TableBlock,
 )
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 XML_NS = {"w": W_NS}
+W_VAL_LITERAL = "w:val"
 
 
 class DocxGenerationPipeline:
+    def __init__(self) -> None:
+        self.logger = logging.getLogger(__name__)
+
     def run(self, payload: DocumentGenerationRequest, file_name: str) -> bytes:
+        _ = file_name
         document = Document()
 
         if payload.extracted_data is not None:
@@ -420,16 +426,21 @@ class DocxGenerationPipeline:
         self._apply_document_defaults(
             document, extracted_data.document_defaults)
         self._apply_extracted_styles(document, extracted_data.styles)
+        self._apply_section_settings(document, extracted_data.sections)
 
         paragraph_by_index = {
             item.index: item for item in extracted_data.paragraphs}
         table_by_index = {item.index: item for item in extracted_data.tables}
+        current_page_index: int | None = None
 
         if extracted_data.document_order:
             for order_item in extracted_data.document_order:
                 if order_item.type == "paragraph":
                     paragraph = paragraph_by_index.get(order_item.index)
                     if paragraph is not None:
+                        next_page = getattr(paragraph, "page_index", None)
+                        current_page_index = self._maybe_add_page_break(
+                            document, current_page_index, next_page)
                         self._add_extracted_paragraph(document, paragraph)
                 elif order_item.type == "table":
                     table = table_by_index.get(order_item.index)
@@ -440,6 +451,47 @@ class DocxGenerationPipeline:
                 self._add_extracted_paragraph(document, paragraph)
             for table in sorted(extracted_data.tables, key=lambda item: item.index):
                 self._add_extracted_table(document, table)
+
+    def _maybe_add_page_break(
+        self,
+        document: Document,
+        current_page: int | None,
+        next_page: int | None,
+    ) -> int | None:
+        """Insert a page break paragraph when the page index advances."""
+        if next_page is None:
+            return current_page
+        if current_page is None:
+            return next_page
+        if next_page > current_page:
+            document.add_page_break()
+            return next_page
+        return current_page
+
+    def _apply_section_settings(self, document: Document, sections: list) -> None:
+        """Apply page dimensions and margins from the first extracted section."""
+        if not sections:
+            return
+        try:
+            from docx.shared import Twips
+            first = sections[0]
+            if not isinstance(first, dict):
+                return
+            sec = document.sections[0]
+            if first.get("page_width_twips"):
+                sec.page_width = Twips(first["page_width_twips"])
+            if first.get("page_height_twips"):
+                sec.page_height = Twips(first["page_height_twips"])
+            if first.get("left_margin_twips"):
+                sec.left_margin = Twips(first["left_margin_twips"])
+            if first.get("right_margin_twips"):
+                sec.right_margin = Twips(first["right_margin_twips"])
+            if first.get("top_margin_twips"):
+                sec.top_margin = Twips(first["top_margin_twips"])
+            if first.get("bottom_margin_twips"):
+                sec.bottom_margin = Twips(first["bottom_margin_twips"])
+        except Exception:
+            pass
 
     def _apply_document_defaults(
         self,
@@ -574,30 +626,76 @@ class DocxGenerationPipeline:
             return None
 
     def _add_extracted_paragraph(self, document: Document, paragraph_data: ExtractedParagraph) -> None:
+        paragraph = self._create_output_paragraph(document, paragraph_data)
+        self._apply_paragraph_spacing(paragraph, paragraph_data)
+        self._apply_paragraph_rtl(paragraph, paragraph_data)
+        self._populate_output_paragraph(paragraph, paragraph_data)
+
+    def _apply_paragraph_spacing(self, paragraph, paragraph_data: ExtractedParagraph) -> None:
+        """Apply space_before_pt, space_after_pt, and line_spacing from extracted data."""
+        fmt = paragraph.paragraph_format
+        try:
+            if paragraph_data.space_before_pt is not None and paragraph_data.space_before_pt >= 0:
+                fmt.space_before = Pt(paragraph_data.space_before_pt)
+            if paragraph_data.space_after_pt is not None and paragraph_data.space_after_pt >= 0:
+                fmt.space_after = Pt(paragraph_data.space_after_pt)
+            if paragraph_data.line_spacing is not None and paragraph_data.line_spacing > 0:
+                fmt.line_spacing = paragraph_data.line_spacing
+        except Exception:
+            pass
+
+    def _apply_paragraph_rtl(self, paragraph, paragraph_data: ExtractedParagraph) -> None:
+        """Insert <w:bidi/> into pPr when paragraph direction is RTL."""
+        if getattr(paragraph_data, "direction", None) != "rtl":
+            return
+        try:
+            p_pr = paragraph._p.get_or_add_pPr()
+            bidi = p_pr.find(qn("w:bidi"))
+            if bidi is None:
+                bidi = OxmlElement("w:bidi")
+                p_pr.append(bidi)
+        except Exception:
+            pass
+
+    def _populate_output_paragraph(self, paragraph, paragraph_data: ExtractedParagraph) -> None:
+        """Apply paragraph style, alignment, and runs/text to an existing paragraph."""
         style_name = self._resolve_paragraph_style_name(paragraph_data)
         if style_name:
             try:
-                paragraph = document.add_paragraph(style=style_name)
+                paragraph.style = style_name
             except KeyError:
-                paragraph = document.add_paragraph()
-        else:
-            paragraph = document.add_paragraph()
+                pass
 
         alignment = self._map_alignment(paragraph_data.alignment)
         if alignment is not None:
             paragraph.alignment = alignment
 
         if paragraph_data.runs:
-            for run_data in paragraph_data.runs:
-                if run_data.hyperlink_url:
-                    self._add_hyperlink_run(paragraph, run_data)
-                else:
-                    run = paragraph.add_run(run_data.text or "")
-                    self._apply_run_formatting(run, run_data)
-                    for media_item in run_data.embedded_media:
-                        self._add_media_to_paragraph(paragraph, media_item)
-        elif paragraph_data.text:
+            self._add_paragraph_runs(paragraph, paragraph_data)
+            return
+        if paragraph_data.text:
             paragraph.add_run(paragraph_data.text)
+
+    def _create_output_paragraph(self, document: Document, paragraph_data: ExtractedParagraph):
+        """Create paragraph with best-effort style assignment."""
+        style_name = self._resolve_paragraph_style_name(paragraph_data)
+        if style_name:
+            try:
+                return document.add_paragraph(style=style_name)
+            except KeyError:
+                return document.add_paragraph()
+        return document.add_paragraph()
+
+    def _add_paragraph_runs(self, paragraph, paragraph_data: ExtractedParagraph) -> None:
+        """Add runs and embedded media to paragraph."""
+        for run_data in paragraph_data.runs:
+            if run_data.hyperlink_url:
+                self._add_hyperlink_run(paragraph, run_data)
+                continue
+            run = paragraph.add_run(run_data.text or "")
+            self._apply_run_formatting(run, run_data)
+            for media_item in run_data.embedded_media:
+                self._add_media_to_paragraph(paragraph, media_item)
 
     def _apply_run_formatting(self, run, run_data) -> None:
         if run_data.bold is not None:
@@ -606,6 +704,8 @@ class DocxGenerationPipeline:
             run.italic = run_data.italic
         if run_data.underline is not None:
             run.underline = run_data.underline
+        if getattr(run_data, "strikethrough", None):
+            run.font.strike = True
         if run_data.font_name:
             run.font.name = run_data.font_name
         if run_data.font_size_pt is not None and run_data.font_size_pt > 0:
@@ -633,7 +733,7 @@ class DocxGenerationPipeline:
         try:
             r_id = paragraph.part.relate_to(
                 url, RT.HYPERLINK, is_external=True)
-        except Exception:
+        except (AttributeError, KeyError, TypeError, ValueError):
             run = paragraph.add_run(text)
             self._apply_run_formatting(run, run_data)
             return
@@ -641,51 +741,55 @@ class DocxGenerationPipeline:
         hyperlink = OxmlElement("w:hyperlink")
         hyperlink.set(qn("r:id"), r_id)
 
-        run_elem = OxmlElement("w:r")
-        rPr = OxmlElement("w:rPr")
-
-        # Explicitly set blue color + underline instead of relying on the
-        # Hyperlink character style, which may use theme colors not present
-        # in the generated document's base template.
-        hyperlink_blue = "0563C1"
-        if run_data.color_rgb:
-            try:
-                hyperlink_blue = run_data.color_rgb.replace("#", "").strip()
-            except Exception:
-                pass
-        color_elem = OxmlElement("w:color")
-        color_elem.set(qn("w:val"), hyperlink_blue)
-        rPr.append(color_elem)
-
-        # Always underline unless the extracted run explicitly had no underline.
-        if run_data.underline is not False:
-            u_elem = OxmlElement("w:u")
-            u_elem.set(qn("w:val"), "single")
-            rPr.append(u_elem)
-
-        if run_data.bold:
-            rPr.append(OxmlElement("w:b"))
-        if run_data.italic:
-            rPr.append(OxmlElement("w:i"))
-        if run_data.font_name:
-            rFonts = OxmlElement("w:rFonts")
-            rFonts.set(qn("w:ascii"), run_data.font_name)
-            rFonts.set(qn("w:hAnsi"), run_data.font_name)
-            rPr.append(rFonts)
-        if run_data.font_size_pt and run_data.font_size_pt > 0:
-            half_pts = str(int(run_data.font_size_pt * 2))
-            sz = OxmlElement("w:sz")
-            sz.set(qn("w:val"), half_pts)
-            rPr.append(sz)
-            szCs = OxmlElement("w:szCs")
-            szCs.set(qn("w:val"), half_pts)
-            rPr.append(szCs)
-
-        run_elem.append(rPr)
+        run_elem = self._build_hyperlink_run_element(run_data, text)
         self._append_text_to_oxml_run(run_elem, text)
 
         hyperlink.append(run_elem)
+        # pylint: disable=protected-access
         paragraph._p.append(hyperlink)
+
+    def _build_hyperlink_run_element(self, run_data, text: str):
+        """Build oxml run element with hyperlink style overrides."""
+        del text
+        run_elem = OxmlElement("w:r")
+        rpr = OxmlElement("w:rPr")
+
+        hyperlink_blue = self._resolve_hyperlink_color(run_data)
+        color_elem = OxmlElement("w:color")
+        color_elem.set(qn(W_VAL_LITERAL), hyperlink_blue)
+        rpr.append(color_elem)
+
+        if run_data.underline is not False:
+            u_elem = OxmlElement("w:u")
+            u_elem.set(qn(W_VAL_LITERAL), "single")
+            rpr.append(u_elem)
+
+        if run_data.bold:
+            rpr.append(OxmlElement("w:b"))
+        if run_data.italic:
+            rpr.append(OxmlElement("w:i"))
+        if run_data.font_name:
+            r_fonts = OxmlElement("w:rFonts")
+            r_fonts.set(qn("w:ascii"), run_data.font_name)
+            r_fonts.set(qn("w:hAnsi"), run_data.font_name)
+            rpr.append(r_fonts)
+        if run_data.font_size_pt and run_data.font_size_pt > 0:
+            half_pts = str(int(run_data.font_size_pt * 2))
+            sz = OxmlElement("w:sz")
+            sz.set(qn(W_VAL_LITERAL), half_pts)
+            rpr.append(sz)
+            sz_cs = OxmlElement("w:szCs")
+            sz_cs.set(qn(W_VAL_LITERAL), half_pts)
+            rpr.append(sz_cs)
+
+        run_elem.append(rpr)
+        return run_elem
+
+    def _resolve_hyperlink_color(self, run_data) -> str:
+        """Return hyperlink color hex (without #), defaulting to theme-friendly blue."""
+        if not run_data.color_rgb:
+            return "0563C1"
+        return run_data.color_rgb.replace("#", "").strip()
 
     def _add_extracted_table(self, document: Document, table_data: ExtractedTable) -> None:
         if not table_data.rows:
@@ -698,18 +802,82 @@ class DocxGenerationPipeline:
 
         table = document.add_table(
             rows=len(table_data.rows), cols=column_count)
-        if table_data.style:
-            try:
-                table.style = table_data.style
-            except KeyError:
-                # Some source styles don't exist in default python-docx templates.
-                pass
+        self._apply_table_style(table, table_data)
+        self._populate_docx_table(table, table_data)
 
+    def _apply_table_style(self, table, table_data: ExtractedTable) -> None:
+        """Apply extracted table style when available."""
+        if not table_data.style:
+            return
+        try:
+            table.style = table_data.style
+        except KeyError:
+            return
+
+    def _populate_docx_table(self, table, table_data: ExtractedTable) -> None:
+        """Populate a docx table recursively from extracted table data."""
         for row_index, row in enumerate(table_data.rows):
-            for column_index in range(column_count):
-                text = row.cells[column_index].text if column_index < len(
-                    row.cells) else ""
-                table.cell(row_index, column_index).text = text or ""
+            for column_index, cell_data in enumerate(row.cells):
+                target_cell = table.cell(row_index, column_index)
+                merged_cell = self._merge_target_cell(
+                    table,
+                    target_cell,
+                    cell_data,
+                    row_index,
+                    column_index,
+                )
+                self._populate_docx_cell(merged_cell, cell_data)
+
+    def _merge_target_cell(self, table, target_cell, cell_data, row_index: int, column_index: int):
+        """Merge table cells when colspan or rowspan is present."""
+        colspan = getattr(cell_data, "colspan", None) or 1
+        rowspan = getattr(cell_data, "rowspan", None) or 1
+        if colspan == 1 and rowspan == 1:
+            return target_cell
+
+        end_row = min(row_index + rowspan - 1, len(table.rows) - 1)
+        end_col = min(column_index + colspan - 1, len(table.columns) - 1)
+        if end_row == row_index and end_col == column_index:
+            return target_cell
+
+        return target_cell.merge(table.cell(end_row, end_col))
+
+    def _populate_docx_cell(self, cell, cell_data) -> None:
+        """Populate a docx table cell with paragraphs and nested tables."""
+        cell.text = ""
+        paragraphs = list(getattr(cell_data, "paragraphs", []) or [])
+
+        if paragraphs:
+            self._populate_existing_cell_paragraph(
+                cell.paragraphs[0], paragraphs[0])
+            for paragraph_data in paragraphs[1:]:
+                paragraph = cell.add_paragraph()
+                self._populate_output_paragraph(paragraph, paragraph_data)
+        elif getattr(cell_data, "text", None):
+            cell.paragraphs[0].add_run(cell_data.text)
+
+        for nested_table in getattr(cell_data, "tables", []) or []:
+            self._add_nested_docx_table(cell, nested_table)
+
+    def _populate_existing_cell_paragraph(self, paragraph, paragraph_data: ExtractedParagraph) -> None:
+        """Populate the default paragraph already present in a table cell."""
+        paragraph.text = ""
+        self._populate_output_paragraph(paragraph, paragraph_data)
+
+    def _add_nested_docx_table(self, cell, table_data: ExtractedTable) -> None:
+        """Add a nested table inside a table cell."""
+        if not table_data.rows:
+            return
+
+        column_count = max((len(row.cells)
+                           for row in table_data.rows), default=0)
+        if column_count == 0:
+            return
+
+        nested_table = cell.add_table(
+            rows=len(table_data.rows), cols=column_count)
+        self._apply_table_style(nested_table, table_data)
+        self._populate_docx_table(nested_table, table_data)
 
     def _add_paragraph_block(self, document: Document, block: ParagraphBlock) -> None:
         if block.heading_level is not None:
@@ -750,14 +918,20 @@ class DocxGenerationPipeline:
                 table.cell(row_index, column_index).text = text
 
     def _resolve_paragraph_style_name(self, paragraph_data: ExtractedParagraph) -> str | None:
-        if paragraph_data.style:
-            return paragraph_data.style
-
         if paragraph_data.is_numbered:
             return "List Number"
 
         if paragraph_data.is_bullet:
             return "List Bullet"
+
+        if paragraph_data.numbering_format:
+            fmt = paragraph_data.numbering_format.split(":", 1)[0].lower()
+            if fmt == "bullet":
+                return "List Bullet"
+            return "List Number"
+
+        if paragraph_data.style:
+            return paragraph_data.style
 
         return None
 

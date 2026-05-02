@@ -28,11 +28,11 @@ class PptGenerationPipeline:
     """
 
     def run(self, payload: DocumentGenerationRequest, file_name: str) -> bytes:
+        _ = file_name
         # Highest-fidelity path: reconstruct pptx package directly from extracted
         # OpenXML parts when available (preserves masters/themes/backgrounds).
         if isinstance(payload.extracted_data, ExtractedPptData):
-            rebuilt = self._try_rebuild_from_package_dump(
-                payload.extracted_data, file_name)
+            rebuilt = self._try_rebuild_from_package_dump(payload.extracted_data)
             if rebuilt is not None:
                 return rebuilt
 
@@ -53,7 +53,7 @@ class PptGenerationPipeline:
         prs.save(output)
         return output.getvalue()
 
-    def _try_rebuild_from_package_dump(self, data: ExtractedPptData, file_name: str) -> bytes | None:
+    def _try_rebuild_from_package_dump(self, data: ExtractedPptData) -> bytes | None:
         if not data.parts:
             return None
 
@@ -180,6 +180,8 @@ class PptGenerationPipeline:
                     title_color_rgb=title_color_rgb,
                 )
                 self._pad_to_shape_count(out_slide, slide.shape_count)
+                self._write_speaker_notes(
+                    out_slide, getattr(slide, "notes_text", None))
 
             return
 
@@ -227,6 +229,9 @@ class PptGenerationPipeline:
                         slide.shapes),
                 )
                 self._pad_to_shape_count(out_slide, slide.shape_count)
+                notes_text = (slide.notes.get("text") or "").strip(
+                ) if isinstance(slide.notes, dict) else ""
+                self._write_speaker_notes(out_slide, notes_text)
 
             return
 
@@ -519,6 +524,16 @@ class PptGenerationPipeline:
                     if self._normalize_hex_rgb(color):
                         return color
         return None
+
+    def _write_speaker_notes(self, slide, notes_text: str | None) -> None:
+        """Write speaker notes to a slide's notes text frame."""
+        if not notes_text or not notes_text.strip():
+            return
+        try:
+            notes_slide = slide.notes_slide
+            notes_slide.notes_text_frame.text = notes_text.strip()
+        except Exception:
+            pass
 
     def _pad_to_shape_count(self, slide, expected_count: int | None) -> None:
         if expected_count is None:

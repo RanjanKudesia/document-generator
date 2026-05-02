@@ -1,6 +1,39 @@
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class ListInfo(BaseModel):
+    kind: Literal["bullet", "numbered"] | None = None
+    numbering_format: str | None = None
+    level: int = 0
+    start: int | None = None
+    model_config = ConfigDict(extra="ignore")
+
+
+class SourceInfo(BaseModel):
+    format: str | None = None
+    tag: str | None = None
+    attrs: dict[str, Any] = Field(default_factory=dict)
+    raw_html: str | None = None
+    model_config = ConfigDict(extra="ignore")
+
+
+class HtmlMetadata(BaseModel):
+    source_type: str | None = None
+    extraction_mode: str | None = None
+    title: str | None = None
+    doctype: str | None = None
+    full_html: str | None = None
+    head_html: str | None = None
+    body_html: str | None = None
+    html_attributes: dict[str, Any] = Field(default_factory=dict)
+    body_attributes: dict[str, Any] = Field(default_factory=dict)
+    style_blocks: list[str] = Field(default_factory=list)
+    meta_tags: list[dict[str, Any]] = Field(default_factory=list)
+    link_tags: list[dict[str, Any]] = Field(default_factory=list)
+    script_blocks: list[dict[str, Any]] = Field(default_factory=list)
+    model_config = ConfigDict(extra="ignore")
 
 
 class ParagraphBlock(BaseModel):
@@ -87,14 +120,20 @@ class ExtractedParagraph(BaseModel):
     index: int
     text: str | None = None
     style: str | None = None
+    code_fence_language: str | None = None
     is_bullet: bool | None = None
     is_numbered: bool | None = None
-    list_info: dict | None = None
+    list_info: ListInfo | None = None
     numbering_format: str | None = None
     list_level: int | None = None
     alignment: str | None = None
     direction: str | None = None
+    space_before_pt: float | None = None
+    space_after_pt: float | None = None
+    line_spacing: float | None = None
+    page_index: int | None = None
     runs: list[ExtractedRun] = Field(default_factory=list)
+    source: SourceInfo | None = None
     model_config = ConfigDict(extra="ignore")
 
 
@@ -103,9 +142,11 @@ class ExtractedTableCell(BaseModel):
     paragraphs: list["ExtractedParagraph"] = Field(default_factory=list)
     tables: list["ExtractedTable"] = Field(default_factory=list)
     is_header: bool | None = None
+    cell_index: int | None = None
     colspan: int | None = None
     rowspan: int | None = None
     nested_table_indices: list[int] = Field(default_factory=list)
+    source: SourceInfo | None = None
     model_config = ConfigDict(extra="ignore")
 
 
@@ -121,6 +162,7 @@ class ExtractedTable(BaseModel):
     column_count: int | None = None
     style: str | None = None
     rows: list[ExtractedTableRow] = Field(default_factory=list)
+    source: SourceInfo | None = None
     model_config = ConfigDict(extra="ignore")
 
 
@@ -130,9 +172,11 @@ class ExtractedOrderItem(BaseModel):
 
 
 class ExtractedData(BaseModel):
+    metadata: HtmlMetadata | dict[str, Any] | None = None
     document_order: list[ExtractedOrderItem] = Field(default_factory=list)
     document_defaults: ExtractedDocumentDefaults | None = None
     styles: list[ExtractedStyle] = Field(default_factory=list)
+    sections: list[dict] = Field(default_factory=list)
     paragraphs: list[ExtractedParagraph] = Field(default_factory=list)
     tables: list[ExtractedTable] = Field(default_factory=list)
     media: list[ExtractedMediaItem] = Field(default_factory=list)
